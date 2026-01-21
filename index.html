@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PROXY MASTER - 分流管理系統</title>
+    <title>PROXY MASTER - 專業代購出貨系統</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -14,19 +14,25 @@
         body { font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; }
         .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
         input[type="number"]::-webkit-inner-spin-button, 
-        input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+        input[type="number"]::-webkit-outer-spin-button { 
+            -webkit-appearance: none; margin: 0; 
+        }
         .fade-in { animation: fadeIn 0.3s ease-in-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        
+        .custom-checkbox { width: 20px; height: 20px; cursor: pointer; accent-color: #10b981; }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel" data-type="module">
-        const { useState, useEffect, useMemo } = React;
+        // 引入 useRef 與 memo 以修復 Icon 崩潰問題
+        const { useState, useEffect, useMemo, useRef, memo } = React;
+
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, doc, setDoc, onSnapshot, addDoc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, addDoc, updateDoc, deleteDoc, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- Firebase 設定 ---
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
@@ -37,107 +43,136 @@
             messagingSenderId: "967854779350",
             appId: "1:967854779350:web:2410ccda9ab280ec2dd277"
         };
+
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        // 確保 App ID 一致
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'proxy-master-jp';
 
-        const Icon = ({ name, size = 18, className = "" }) => {
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
-            return <i data-lucide={name} className={className} style={{ width: size, height: size }}></i>;
-        };
+        // --- 關鍵修正：安全的 Icon 元件 ---
+        // 使用 ref 與 memo 來隔離 React 與 Lucide 的 DOM 操作，防止白畫面崩潰
+        const Icon = memo(({ name, size = 18, className = "" }) => {
+            const containerRef = useRef(null);
 
-        // --- 診斷用：日誌組件 ---
-        const DebugLog = ({ logs }) => (
-            <div className="fixed bottom-0 left-0 w-full bg-black/80 text-green-400 text-[10px] p-2 font-mono h-32 overflow-y-auto pointer-events-none z-[9999]">
-                <div className="font-bold text-white border-b border-gray-600 mb-1">系統診斷日誌 (若資料未顯示請截圖此處)</div>
-                {logs.map((log, i) => <div key={i}>{log}</div>)}
-            </div>
-        );
+            useEffect(() => {
+                if (window.lucide && containerRef.current) {
+                    // 手動建立一個 i 標籤供 Lucide 替換，不影響 React 的 Virtual DOM
+                    const i = document.createElement('i');
+                    i.setAttribute('data-lucide', name);
+                    i.setAttribute('class', className);
+                    
+                    // 清空容器並放入新的 i 標籤
+                    containerRef.current.innerHTML = '';
+                    containerRef.current.appendChild(i);
+
+                    // 叫 Lucide 只處理這個容器內的圖示
+                    window.lucide.createIcons({
+                        root: containerRef.current,
+                        nameAttr: 'data-lucide'
+                    });
+                }
+            }, [name, size, className]);
+
+            return <div ref={containerRef} style={{ display: 'inline-flex', width: size, height: size, alignItems: 'center', justifyContent: 'center' }} />;
+        });
 
         // --- 組件：待歸戶倉庫的單一行 ---
-        const UnassignedItemRow = ({ item, db, appId, defaultRate }) => {
-            const [editData, setEditData] = useState({ 
-                name: item.name, 
-                jpyPrice: item.jpyPrice, 
-                twdCost: item.twdCost, 
-                sellingPrice: item.sellingPrice,
-                recipientName: "" 
-            });
-
-            const handleSave = async () => {
-                if (!editData.recipientName.trim()) {
-                    alert("請填寫購買人(收件人)才能完成歸戶！");
-                    return;
-                }
-                try {
-                    const ref = doc(db, 'artifacts', appId, 'public', 'data', 'items', item.id);
-                    await updateDoc(ref, {
-                        name: editData.name,
-                        jpyPrice: parseFloat(editData.jpyPrice),
-                        twdCost: parseFloat(editData.twdCost),
-                        sellingPrice: parseFloat(editData.sellingPrice),
-                        recipientName: editData.recipientName.trim(), 
-                        updatedAt: Date.now()
-                    });
-                } catch(e) { alert("歸戶失敗: " + e.message); }
-            };
-
-            const handleDelete = async () => {
-                if(confirm("確定刪除此商品？")) await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'items', item.id));
-            };
-
-            const handleJpyChange = (val) => {
-                setEditData(prev => ({ 
-                    ...prev, 
-                    jpyPrice: val, 
-                    twdCost: val ? Math.round(val * defaultRate) : '' 
-                }));
-            };
+        const UnassignedItemRow = ({ item, onEdit, onDelete, onTogglePaid, existingRecipients, onQuickAssign }) => {
+            const [quickName, setQuickName] = useState("");
+            const isShipped = item.isChecked;
 
             return (
-                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col gap-3 transition-all hover:shadow-md fade-in">
-                    <div className="flex justify-between items-start">
-                        <div className="flex-1 space-y-2">
-                            <div>
-                                <label className="text-[10px] text-slate-400 font-bold uppercase">商品名稱</label>
-                                <input className="w-full font-bold text-slate-800 border-b border-slate-200 focus:border-blue-500 outline-none pb-1" 
-                                    value={editData.name} onChange={e => setEditData({...editData, name: e.target.value})} />
+                <div className={`bg-white p-4 rounded-xl border shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 transition-all hover:shadow-md fade-in relative overflow-hidden ${item.isPaid ? 'border-l-4 border-l-green-500' : 'border-slate-200'} ${isShipped ? 'opacity-60 bg-slate-50 grayscale' : ''}`}>
+                    
+                    {isShipped && (
+                        <div className="absolute top-2 right-10 rotate-12 border-2 border-slate-300 text-slate-400 font-black px-2 rounded uppercase text-xs z-0 pointer-events-none">
+                            SHIPPED / 已出貨
+                        </div>
+                    )}
+
+                    <div className="flex-1 w-full z-10">
+                        <div className="flex items-center justify-between sm:justify-start gap-2 mb-1">
+                            <span className="bg-slate-100 text-slate-500 text-[10px] px-2 py-0.5 rounded-full font-bold">
+                                {item.parcelId || "無批次"}
+                            </span>
+                            <button 
+                                onClick={() => onTogglePaid(item)}
+                                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-colors ${item.isPaid ? 'bg-green-100 text-green-700 border-green-200' : 'bg-slate-50 text-slate-400 border-slate-200 hover:bg-slate-100'}`}
+                            >
+                                <Icon name="dollar-sign" size={12}/> {item.isPaid ? "已付款" : "未付款"}
+                            </button>
+                        </div>
+                        
+                        <h3 className={`font-bold text-lg ${isShipped ? 'line-through text-slate-400' : 'text-slate-800'}`}>
+                            {item.name}
+                        </h3>
+
+                        <div className="flex items-center gap-3 text-sm mt-1">
+                            <div className="flex flex-col">
+                                <span className="text-[9px] text-blue-400 font-bold uppercase">日幣</span>
+                                <span className="font-mono font-bold text-slate-600">¥{item.jpyPrice}</span>
                             </div>
-                            <div className="grid grid-cols-3 gap-2">
-                                <div>
-                                    <label className="text-[10px] text-blue-400 font-bold uppercase">日幣</label>
-                                    <input type="number" className="w-full font-mono text-sm bg-slate-50 rounded p-1" 
-                                        value={editData.jpyPrice} onChange={e => handleJpyChange(e.target.value)} />
-                                </div>
-                                <div>
-                                    <label className="text-[10px] text-blue-400 font-bold uppercase">台幣成本</label>
-                                    <input type="number" className="w-full font-mono text-sm bg-slate-50 rounded p-1" 
-                                        value={editData.twdCost} onChange={e => setEditData({...editData, twdCost: e.target.value})} />
-                                </div>
-                                <div>
-                                    <label className="text-[10px] text-green-500 font-bold uppercase">賣價</label>
-                                    <input type="number" className="w-full font-mono font-bold text-sm bg-green-50 text-green-700 rounded p-1" 
-                                        value={editData.sellingPrice} onChange={e => setEditData({...editData, sellingPrice: e.target.value})} />
-                                </div>
+                            <div className="w-px h-6 bg-slate-200"></div>
+                             <div className="flex flex-col">
+                                <span className="text-[9px] text-amber-500 font-bold uppercase">匯率</span>
+                                <span className="font-mono font-bold text-slate-400">{item.exchangeRate || '-'}</span>
+                            </div>
+                            <div className="w-px h-6 bg-slate-200"></div>
+                            <div className="flex flex-col">
+                                <span className="text-[9px] text-slate-400 font-bold uppercase">成本</span>
+                                <span className="font-mono font-bold text-slate-600">${item.twdCost}</span>
+                            </div>
+                            <div className="w-px h-6 bg-slate-200"></div>
+                            <div className="flex flex-col">
+                                <span className="text-[9px] text-green-500 font-bold uppercase">賣價</span>
+                                <span className="font-mono font-bold text-green-600">${item.sellingPrice}</span>
                             </div>
                         </div>
                     </div>
-                    <div className="pt-3 border-t border-slate-100 flex items-center gap-2">
-                        <div className="flex-1">
-                             <label className="text-[10px] text-slate-400 font-bold uppercase mb-1 block">指定購買人 (歸戶)</label>
-                             <div className="flex gap-2">
-                                <input placeholder="輸入姓名..." className="flex-1 bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2 font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-yellow-400"
-                                    value={editData.recipientName} onChange={e => setEditData({...editData, recipientName: e.target.value})} 
-                                    onKeyDown={e => e.key === 'Enter' && handleSave()}
+                    
+                    <div className="flex flex-col sm:flex-row items-end sm:items-center gap-2 w-full sm:w-auto z-10">
+                        {item.recipientName ? (
+                            <div className="text-right px-3 py-1 bg-green-50 border border-green-100 rounded-lg">
+                                <div className="text-[9px] text-green-400 font-bold">已歸戶給</div>
+                                <div className="font-bold text-green-700 text-sm">{item.recipientName}</div>
+                                {item.orderingAccount && <div className="text-[9px] text-green-600 opacity-70">({item.orderingAccount})</div>}
+                            </div>
+                        ) : (
+                            <div className="flex items-center gap-1 w-full sm:w-auto">
+                                <input 
+                                    list="recipients-list"
+                                    placeholder="輸入姓名快速歸戶..." 
+                                    className="border border-slate-300 rounded-lg px-2 py-1.5 text-xs w-full sm:w-32 focus:border-blue-500 outline-none"
+                                    value={quickName}
+                                    onChange={(e) => setQuickName(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && quickName.trim()) {
+                                            onQuickAssign(item, quickName.trim());
+                                            setQuickName("");
+                                        }
+                                    }}
+                                    disabled={isShipped}
                                 />
-                                <button onClick={handleSave} className="bg-slate-800 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-slate-700 flex items-center gap-1">
-                                    <Icon name="archive-restore" size={16}/> 歸戶
+                                <datalist id="recipients-list">
+                                    {existingRecipients.map(name => <option key={name} value={name} />)}
+                                </datalist>
+                                <button 
+                                    onClick={() => { if(quickName.trim()) { onQuickAssign(item, quickName.trim()); setQuickName(""); }}}
+                                    className="bg-blue-600 text-white p-1.5 rounded-lg hover:bg-blue-500 disabled:bg-slate-400"
+                                    disabled={isShipped}
+                                >
+                                    <Icon name="check" size={14}/>
                                 </button>
-                             </div>
+                            </div>
+                        )}
+                        <div className="flex gap-1 w-full sm:w-auto justify-end">
+                            <button onClick={() => onEdit(item)} className="p-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 shadow flex items-center gap-1">
+                                <Icon name="pencil" size={14}/>
+                            </button>
+                            <button onClick={() => onDelete(item.id)} className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg border border-transparent hover:border-red-100 transition-colors">
+                                <Icon name="trash-2" size={18}/>
+                            </button>
                         </div>
-                        <button onClick={handleDelete} className="p-2 text-slate-300 hover:text-red-500 mt-5"><Icon name="trash-2" size={18}/></button>
                     </div>
                 </div>
             );
@@ -146,88 +181,266 @@
         const App = () => {
             const [user, setUser] = useState(null);
             const [items, setItems] = useState([]);
+            const [batchOverheads, setBatchOverheads] = useState({});
             const [activeTab, setActiveTab] = useState('input');
-            const [defaultRate, setDefaultRate] = useState(0.22);
+            
+            // 編輯狀態
+            const [editingId, setEditingId] = useState(null);
             const [batchName, setBatchName] = useState("");
-            const [formData, setFormData] = useState({ name: '', jpyPrice: '', manualTwdPrice: '', sellingPrice: '' });
-            const [logs, setLogs] = useState([]);
+            const [editingRecipient, setEditingRecipient] = useState(null);
 
-            const addLog = (msg) => setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev]);
+            // 表單資料結構
+            const [formData, setFormData] = useState({
+                name: '', 
+                jpyPrice: '', 
+                manualTwdPrice: '', 
+                sellingPrice: '',
+                exchangeRate: 0.22, // 預設匯率
+                orderingAccount: '', 
+                recipientName: '', 
+                recipientPhone: '', 
+                recipientAddress: '', 
+                recipientShipping: '60', 
+                shippingCode: ''
+            });
 
             useEffect(() => {
-                addLog("系統啟動，嘗試匿名登入...");
-                signInAnonymously(auth)
-                    .then(u => addLog(`登入成功! User ID: ${u.user.uid.slice(0,5)}...`))
-                    .catch(e => addLog(`❌ 登入失敗: ${e.message}`));
+                const initAuth = async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
+                        else await signInAnonymously(auth);
+                    } catch (e) { console.error(e); }
+                };
+                initAuth();
                 return onAuthStateChanged(auth, setUser);
             }, []);
 
             useEffect(() => {
                 if (!user) return;
-                addLog(`開始監聽資料庫: artifacts/${appId}/public/data/items`);
-                const q = collection(db, 'artifacts', appId, 'public', 'data', 'items');
-                
-                const unsubscribe = onSnapshot(q, (snapshot) => {
-                    const loadedItems = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-                    setItems(loadedItems);
-                    addLog(`📥 接收到資料更新: 共 ${loadedItems.length} 筆`);
-                    if(loadedItems.length === 0) addLog("⚠️ 資料庫目前為空，或無讀取權限");
-                }, (error) => {
-                    console.error(error);
-                    addLog(`❌ 資料讀取錯誤 (權限不足?): ${error.code} - ${error.message}`);
-                });
-
-                return () => unsubscribe();
+                const unsubItems = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'items'), 
+                    (s) => setItems(s.docs.map(d => ({ id: d.id, ...d.data() }))));
+                const unsubOverheads = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'overheads'), 
+                    (s) => {
+                        const obj = {};
+                        s.docs.forEach(d => obj[d.id] = d.data());
+                        setBatchOverheads(obj);
+                    });
+                return () => { unsubItems(); unsubOverheads(); };
             }, [user]);
 
-            const unassignedItems = useMemo(() => items.filter(i => !i.recipientName || i.recipientName === ""), [items]);
-            const assignedItems = useMemo(() => items.filter(i => i.recipientName && i.recipientName !== ""), [items]);
-            
+            const existingRecipients = useMemo(() => {
+                return Array.from(new Set(items.map(i => i.recipientName).filter(n => n && n.trim() !== "")));
+            }, [items]);
+
+            // --- 邏輯修正區 ---
+
+            const handleRateChange = (val) => {
+                const newRate = val === '' ? '' : parseFloat(val);
+                const jpy = parseFloat(formData.jpyPrice) || 0;
+                setFormData(prev => ({ 
+                    ...prev, 
+                    exchangeRate: val,
+                    manualTwdPrice: jpy === 0 || newRate === '' ? prev.manualTwdPrice : Math.round(jpy * newRate) 
+                }));
+            };
+
             const handleJpyChange = (val) => {
                 const num = val === '' ? '' : parseFloat(val);
-                setFormData(prev => ({ ...prev, jpyPrice: val, manualTwdPrice: num === '' ? '' : Math.round(num * defaultRate) }));
+                const currentRate = parseFloat(formData.exchangeRate) || 0;
+                setFormData(prev => ({ 
+                    ...prev, 
+                    jpyPrice: val, 
+                    manualTwdPrice: num === '' ? '' : Math.round(num * currentRate) 
+                }));
             };
 
             const handleSubmit = async (e) => {
                 e.preventDefault();
-                if (!user) return alert("尚未連線，請稍候");
+                if (!user) return;
+                const pId = batchName.trim() || "預設批次";
                 
-                addLog("正在存檔...");
-                const pId = batchName || "無批次號";
-                const newItem = { 
+                let finalAccount = formData.orderingAccount;
+                let finalPhone = formData.recipientPhone;
+                let finalAddress = formData.recipientAddress;
+                let finalCode = formData.shippingCode;
+
+                const existPerson = items.find(i => i.recipientName === formData.recipientName && i.recipientName !== "");
+                
+                if (existPerson) {
+                    if(!finalAccount) finalAccount = existPerson.orderingAccount;
+                    if(!finalPhone) finalPhone = existPerson.recipientPhone;
+                    if(!finalAddress) finalAddress = existPerson.recipientAddress;
+                    if(!finalCode) finalCode = existPerson.shippingCode;
+                }
+
+                const data = { 
                     ...formData, 
+                    exchangeRate: parseFloat(formData.exchangeRate || 0), 
+                    orderingAccount: finalAccount || '',
                     twdCost: parseFloat(formData.manualTwdPrice || 0), 
                     parcelId: pId, 
                     sellingPrice: parseFloat(formData.sellingPrice || 0), 
-                    recipientName: "", 
-                    recipientShipping: 0, 
-                    recipientAddress: '', 
-                    isPacked: false, 
+                    recipientPhone: finalPhone || '',
+                    recipientAddress: finalAddress || '',
+                    shippingCode: finalCode || '',
+                    recipientShipping: formData.recipientShipping || '',
                     updatedAt: Date.now() 
                 };
 
                 try {
-                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'items'), { ...newItem, timestamp: new Date().toLocaleString() });
-                    addLog("✅ 存檔成功！");
-                    setFormData(p => ({ ...p, name: '', jpyPrice: '', manualTwdPrice: '', sellingPrice: '' }));
-                    setActiveTab('sorting');
-                } catch (err) { 
-                    console.error(err);
-                    addLog(`❌ 存檔失敗: ${err.message}`);
-                    alert("錯誤: " + err.message); 
+                    if (editingId) {
+                        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'items', editingId), data);
+                        setEditingId(null);
+                        setActiveTab('warehouse');
+                        setFormData(p => ({ 
+                            name: '', jpyPrice: '', manualTwdPrice: '', sellingPrice: '', 
+                            exchangeRate: p.exchangeRate, 
+                            orderingAccount: '', recipientName: '', recipientPhone: '', recipientAddress: '', recipientShipping: '60', shippingCode: '' 
+                        }));
+                    } else {
+                        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'items'), { ...data, isPaid: false, isChecked: false, timestamp: new Date().toLocaleString() });
+                        setFormData(p => ({ 
+                            ...p, name: '', jpyPrice: '', manualTwdPrice: '', sellingPrice: ''
+                        }));
+                    }
+                } catch (err) { alert("儲存失敗：" + err.message); }
+            };
+
+            const startEdit = (item) => {
+                setActiveTab('input');
+                setEditingId(item.id);
+                setBatchName(item.parcelId || ""); 
+                
+                let historicalRate = item.exchangeRate;
+                if (!historicalRate && item.jpyPrice && item.twdCost) {
+                    historicalRate = (item.twdCost / item.jpyPrice).toFixed(3);
                 }
+
+                setFormData({
+                    name: item.name, 
+                    jpyPrice: item.jpyPrice, 
+                    manualTwdPrice: item.twdCost, 
+                    sellingPrice: item.sellingPrice,
+                    exchangeRate: historicalRate || 0.22, 
+                    orderingAccount: item.orderingAccount || '',
+                    recipientName: item.recipientName || '', 
+                    recipientPhone: item.recipientPhone || '',
+                    recipientAddress: item.recipientAddress || '', 
+                    shippingCode: item.shippingCode || '', 
+                    recipientShipping: item.recipientShipping || ''
+                });
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+
+            const handleDelete = async (id) => {
+                if(confirm("確定刪除此商品？")) await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'items', id));
+            };
+
+            const togglePaid = async (item) => {
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'items', item.id), { isPaid: !item.isPaid });
+            };
+
+            const toggleChecked = async (item) => {
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'items', item.id), { isChecked: !item.isChecked });
+            };
+
+            const handleQuickAssign = async (item, name) => {
+                const exist = items.find(i => i.recipientName === name);
+                const updates = { recipientName: name };
+                if (exist) {
+                    updates.orderingAccount = exist.orderingAccount;
+                    updates.recipientPhone = exist.recipientPhone;
+                    updates.recipientAddress = exist.recipientAddress;
+                    updates.recipientShipping = exist.recipientShipping;
+                    updates.shippingCode = exist.shippingCode;
+                }
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'items', item.id), updates);
+            };
+
+            // *** 修正後的 saveRecipientInfo，解決資料匹配錯誤與崩潰 ***
+            const saveRecipientInfo = async () => {
+                if (!editingRecipient) return;
+                const { batchId, originalName, name, account, phone, address, code, shipping } = editingRecipient;
+                
+                if (!originalName) {
+                    alert("發生錯誤：原始姓名遺失");
+                    return;
+                }
+
+                try {
+                    // 修正：將 parcelId 強制轉為 String 進行比對
+                    // 這能解決資料庫是 undefined 但分組是 "undefined" 字串導致找不到商品的問題
+                    const targetItems = items.filter(i => {
+                        const itemBatch = i.parcelId ? String(i.parcelId) : "undefined";
+                        const targetBatch = batchId ? String(batchId) : "undefined";
+                        return itemBatch === targetBatch && i.recipientName === originalName;
+                    });
+
+                    if (targetItems.length === 0) {
+                        alert("系統找不到可更新的商品 (可能是批次分組匹配問題)，請重整後再試");
+                        setEditingRecipient(null);
+                        return;
+                    }
+
+                    const batch = writeBatch(db);
+                    targetItems.forEach(item => {
+                        const ref = doc(db, 'artifacts', appId, 'public', 'data', 'items', item.id);
+                        batch.update(ref, {
+                            recipientName: name, 
+                            orderingAccount: account || '', 
+                            recipientPhone: phone || '',
+                            recipientAddress: address || '',
+                            shippingCode: code || '',
+                            recipientShipping: shipping || ''
+                        });
+                    });
+
+                    await batch.commit();
+                    setEditingRecipient(null);
+                } catch(e) { 
+                    console.error("更新錯誤:", e);
+                    alert("更新失敗: " + e.message); 
+                }
+            };
+
+            const updateOverhead = async (pId, field, val) => {
+                if (!user) return;
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'overheads', pId), { [field]: parseFloat(val || 0) }, { merge: true });
             };
 
             const shippingGroups = useMemo(() => {
                 const groups = {};
-                assignedItems.forEach(item => {
-                    const pid = item.parcelId || "未知批次";
-                    if (!groups[pid]) groups[pid] = {};
-                    if (!groups[pid][item.recipientName]) groups[pid][item.recipientName] = [];
-                    groups[pid][item.recipientName].push(item);
+                const assignedItems = items.filter(i => i.recipientName && i.recipientName !== "");
+                assignedItems.sort((a,b) => (b.updatedAt || 0) - (a.updatedAt || 0)).forEach(item => {
+                    // 將 undefined 的 parcelId 轉為 "undefined" 字串作為 key
+                    const pKey = item.parcelId ? String(item.parcelId) : "undefined";
+                    if (!groups[pKey]) groups[pKey] = {};
+                    if (!groups[pKey][item.recipientName]) {
+                        groups[pKey][item.recipientName] = { 
+                            items: [], 
+                            info: { 
+                                account: item.orderingAccount,
+                                phone: item.recipientPhone, 
+                                address: item.recipientAddress, 
+                                code: item.shippingCode, 
+                                shipping: item.recipientShipping 
+                            } 
+                        };
+                    }
+                    groups[pKey][item.recipientName].items.push(item);
                 });
                 return groups;
-            }, [assignedItems]);
+            }, [items]);
+
+            const warehouseItems = useMemo(() => {
+                return [...items].sort((a, b) => {
+                    if (!!a.recipientName !== !!b.recipientName) return a.recipientName ? 1 : -1;
+                    if (!!a.isChecked !== !!b.isChecked) return a.isChecked ? 1 : -1;
+                    return (b.updatedAt || 0) - (a.updatedAt || 0);
+                });
+            }, [items]);
+
+            const unassignedCount = items.filter(i => !i.recipientName).length;
 
             return (
                 <div className="min-h-screen pb-40">
@@ -236,100 +449,207 @@
                             <h1 className="font-black text-lg italic text-slate-800 flex items-center gap-2">
                                 <Icon name="truck" className="text-blue-600"/> PROXY<span className="text-blue-600">MASTER</span>
                             </h1>
-                            <div className="flex items-center gap-2">
-                                <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full ${user ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
-                                    <div className={`w-2 h-2 rounded-full ${user ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-                                    {user ? "連線正常" : "未連線"}
-                                </div>
-                            </div>
                         </div>
                         <div className="max-w-4xl mx-auto mt-2 flex bg-slate-100 p-1 rounded-lg">
-                            <button onClick={() => setActiveTab('input')} className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${activeTab==='input' ? 'bg-white shadow text-slate-800' : 'text-slate-400'}`}>採購錄入</button>
-                            <button onClick={() => setActiveTab('sorting')} className={`flex-1 py-2 rounded-md text-xs font-bold transition-all flex justify-center items-center gap-2 ${activeTab==='sorting' ? 'bg-white shadow text-slate-800' : 'text-slate-400'}`}>
-                                待歸戶倉庫
-                                {unassignedItems.length > 0 && <span className="bg-red-500 text-white px-1.5 rounded-full text-[10px]">{unassignedItems.length}</span>}
+                            <button onClick={() => setActiveTab('input')} className={`flex-1 py-2 rounded-md text-xs font-bold transition-all flex justify-center items-center gap-2 ${activeTab==='input' ? 'bg-white shadow text-slate-800' : 'text-slate-400'}`}><Icon name="plus-circle" size={14}/> 1. 採購錄入</button>
+                            <button onClick={() => setActiveTab('warehouse')} className={`flex-1 py-2 rounded-md text-xs font-bold transition-all flex justify-center items-center gap-2 ${activeTab==='warehouse' ? 'bg-white shadow text-slate-800' : 'text-slate-400'}`}>
+                                <Icon name="package" size={14}/> 2. 待歸戶倉庫
+                                {unassignedCount > 0 && <span className="bg-red-500 text-white px-1.5 rounded-full text-[10px]">{unassignedCount}</span>}
                             </button>
-                            <button onClick={() => setActiveTab('shipping')} className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${activeTab==='shipping' ? 'bg-white shadow text-slate-800' : 'text-slate-400'}`}>出貨管理</button>
+                            <button onClick={() => setActiveTab('shipping')} className={`flex-1 py-2 rounded-md text-xs font-bold transition-all flex justify-center items-center gap-2 ${activeTab==='shipping' ? 'bg-white shadow text-slate-800' : 'text-slate-400'}`}><Icon name="send" size={14}/> 3. 出貨管理</button>
                         </div>
                     </div>
 
                     <div className="max-w-4xl mx-auto px-4 pt-6">
                         {activeTab === 'input' && (
                             <div className="max-w-sm mx-auto fade-in">
-                                <div className="bg-slate-800 text-white rounded-3xl p-6 shadow-2xl border border-slate-700">
-                                    <h2 className="text-lg font-bold mb-6 flex items-center gap-2 text-green-400"><Icon name="plus-circle" /> 採購快速錄入</h2>
-                                    <form onSubmit={handleSubmit} className="space-y-5">
-                                        <div>
-                                            <label className="text-xs font-bold text-slate-400 mb-1 block">批次名稱 (Batch)</label>
-                                            <input required className="w-full bg-slate-700/50 border border-slate-600 rounded-xl px-4 py-3 text-white outline-none focus:border-blue-500" placeholder="例: 0121東京" value={batchName} onChange={e => setBatchName(e.target.value)} />
+                                <form onSubmit={handleSubmit} className={`p-6 rounded-3xl shadow-2xl border transition-all ${editingId ? 'bg-amber-50 border-amber-400' : 'bg-slate-800 border-slate-700 text-white'}`}>
+                                    <h2 className={`text-lg font-bold mb-6 flex items-center gap-2 ${editingId ? 'text-amber-700' : 'text-green-400'}`}><Icon name={editingId ? "edit-3" : "shopping-cart"} /> {editingId ? "編輯商品資料" : "新商品快速錄入"}</h2>
+                                    <div className="space-y-4">
+                                        <div><label className={`text-xs font-bold mb-1 block ${editingId ? 'text-amber-800' : 'text-slate-400'}`}>批次名稱</label><input required className={`w-full border rounded-xl px-4 py-3 outline-none ${editingId ? 'bg-white border-amber-300' : 'bg-slate-700/50 border-slate-600 text-white focus:border-blue-500'}`} placeholder="例: 0121東京" value={batchName} onChange={e => setBatchName(e.target.value)} /></div>
+                                        <div><label className={`text-xs font-bold mb-1 block ${editingId ? 'text-amber-800' : 'text-slate-400'}`}>品名</label><input required className={`w-full border rounded-xl px-4 py-3 outline-none ${editingId ? 'bg-white border-amber-300' : 'bg-slate-700/50 border-slate-600 text-white focus:border-blue-500'}`} placeholder="輸入商品名稱" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} /></div>
+                                        
+                                        <div className="grid grid-cols-12 gap-3">
+                                            <div className="col-span-3">
+                                                <label className={`text-[10px] font-bold mb-1 block ${editingId ? 'text-amber-800' : 'text-amber-400'}`}>當下匯率</label>
+                                                <input type="number" step="0.001" className={`w-full border rounded-xl px-2 py-3 font-mono outline-none text-center ${editingId ? 'bg-white border-amber-300' : 'bg-slate-700/50 border-slate-600 text-amber-400 font-bold'}`} value={formData.exchangeRate} onChange={e => handleRateChange(e.target.value)} />
+                                            </div>
+                                            <div className="col-span-4">
+                                                <label className={`text-[10px] font-bold mb-1 block ${editingId ? 'text-amber-800' : 'text-blue-400'}`}>日幣原價</label>
+                                                <input type="number" className={`w-full border rounded-xl px-3 py-3 font-mono outline-none ${editingId ? 'bg-white border-amber-300' : 'bg-slate-700/50 border-slate-600 text-white'}`} value={formData.jpyPrice} onChange={e => handleJpyChange(e.target.value)} />
+                                            </div>
+                                            <div className="col-span-5">
+                                                <label className={`text-[10px] font-bold mb-1 block ${editingId ? 'text-amber-800' : 'text-blue-400'}`}>台幣成本 (可手改)</label>
+                                                <input type="number" className={`w-full border rounded-xl px-3 py-3 font-mono outline-none ${editingId ? 'bg-white border-amber-300' : 'bg-slate-700/50 border-slate-600 text-white'}`} value={formData.manualTwdPrice} onChange={e => setFormData({...formData, manualTwdPrice: e.target.value})} />
+                                            </div>
                                         </div>
-                                        <div>
-                                            <label className="text-xs font-bold text-slate-400 mb-1 block">品名</label>
-                                            <input required className="w-full bg-slate-700/50 border border-slate-600 rounded-xl px-4 py-3 text-white outline-none focus:border-blue-500" placeholder="輸入商品名稱" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
+
+                                        <div><label className="text-xs font-bold text-green-500 mb-1 block">預計賣價 (TWD)</label><input required type="number" className="w-full bg-green-900/20 border border-green-800 rounded-xl px-4 py-3 text-green-400 font-bold text-xl outline-none" placeholder="0" value={formData.sellingPrice} onChange={e => setFormData({...formData, sellingPrice: e.target.value})} /></div>
+                                        
+                                        <div className={`p-3 rounded-xl ${editingId ? 'bg-amber-100' : 'bg-slate-700/30 border border-slate-600'}`}>
+                                            <label className="text-[10px] font-bold opacity-70 mb-2 block uppercase">指定購買人 (歸戶)</label>
+                                            <div className="grid grid-cols-2 gap-2 mb-2">
+                                                <input placeholder="訂購帳號 (FB/IG)" className={`p-2 border rounded-lg text-sm ${editingId ? 'bg-white' : 'bg-slate-600 border-slate-500 text-white'}`} value={formData.orderingAccount} onChange={e => setFormData({...formData, orderingAccount: e.target.value})} />
+                                                <div className="relative">
+                                                    <input list="input-recipients-list" placeholder="收件姓名" className={`w-full p-2 border rounded-lg text-sm ${editingId ? 'bg-white' : 'bg-slate-600 border-slate-500 text-white'}`} value={formData.recipientName} onChange={e => setFormData({...formData, recipientName: e.target.value})} />
+                                                    <datalist id="input-recipients-list">{existingRecipients.map(n => <option key={n} value={n}/>)}</datalist>
+                                                </div>
+                                            </div>
+                                            <input placeholder="電話" className={`w-full p-2 border rounded-lg text-sm mb-2 ${editingId ? 'bg-white' : 'bg-slate-600 border-slate-500 text-white'}`} value={formData.recipientPhone} onChange={e => setFormData({...formData, recipientPhone: e.target.value})} />
+                                            <input placeholder="地址 / 店到店" className={`w-full p-2 border rounded-lg text-sm mb-2 ${editingId ? 'bg-white' : 'bg-slate-600 border-slate-500 text-white'}`} value={formData.recipientAddress} onChange={e => setFormData({...formData, recipientAddress: e.target.value})} />
+                                            <div className="grid grid-cols-2 gap-2 mb-2">
+                                                <input placeholder="寄件代碼" className={`p-2 border rounded-lg text-sm ${editingId ? 'bg-white' : 'bg-slate-600 border-slate-500 text-white'}`} value={formData.shippingCode} onChange={e => setFormData({...formData, shippingCode: e.target.value})} />
+                                                <div className="flex items-center gap-1">
+                                                    <span className="text-[10px] opacity-70 whitespace-nowrap">運費</span>
+                                                    <input placeholder="例: 60/貨到付款" className={`w-full text-right bg-transparent border-b outline-none text-xs ${editingId ? 'border-amber-400' : 'border-slate-500 text-white'}`} value={formData.recipientShipping} onChange={e => setFormData({...formData, recipientShipping: e.target.value})} />
+                                                </div>
+                                            </div>
                                         </div>
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div><label className="text-xs font-bold text-slate-400 mb-1 block">日幣原價</label><input type="number" className="w-full bg-slate-700/50 border border-slate-600 rounded-xl px-4 py-3 text-white font-mono outline-none" value={formData.jpyPrice} onChange={e => handleJpyChange(e.target.value)} /></div>
-                                            <div><label className="text-xs font-bold text-slate-400 mb-1 block">台幣成本</label><input type="number" className="w-full bg-slate-700/50 border border-slate-600 rounded-xl px-4 py-3 text-white font-mono outline-none" value={formData.manualTwdPrice} onChange={e => setFormData({...formData, manualTwdPrice: e.target.value})} /></div>
-                                        </div>
-                                        <div><label className="text-xs font-bold text-green-400 mb-1 block">預計賣價 (TWD)</label><input required type="number" className="w-full bg-green-900/20 border border-green-800 rounded-xl px-4 py-3 text-green-400 font-bold text-xl outline-none" placeholder="0" value={formData.sellingPrice} onChange={e => setFormData({...formData, sellingPrice: e.target.value})} /></div>
-                                        <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-lg font-bold text-white shadow-lg flex justify-center items-center gap-2 mt-4"><Icon name="save" /> 存入並去歸戶</button>
-                                        <div className="flex justify-between items-center text-[10px] text-slate-500 mt-2">
-                                            <span>匯率: {defaultRate}</span>
-                                            <input type="number" step="0.001" value={defaultRate} onChange={e => setDefaultRate(e.target.value)} className="w-16 bg-transparent text-right border-b border-slate-600 outline-none text-slate-400"/>
-                                        </div>
-                                    </form>
-                                </div>
+                                        <button type="submit" className={`w-full py-3 rounded-lg font-bold text-white shadow-lg flex justify-center items-center gap-2 mt-4 ${editingId ? 'bg-amber-600 hover:bg-amber-500' : 'bg-blue-600 hover:bg-blue-500'}`}><Icon name="save" /> {editingId ? "更新並回到倉庫" : "存入並繼續新增"}</button>
+                                        {editingId && <button type="button" onClick={() => { setEditingId(null); setActiveTab('warehouse'); }} className="w-full text-center text-xs opacity-60 mt-2 underline">取消編輯</button>}
+                                    </div>
+                                </form>
                             </div>
                         )}
 
-                        {activeTab === 'sorting' && (
-                            <div className="fade-in">
-                                <div className="mb-4 flex items-center justify-between">
-                                    <h2 className="text-xl font-black text-slate-700">待歸戶商品 ({unassignedItems.length})</h2>
-                                    <button onClick={() => setActiveTab('input')} className="text-xs text-blue-500 font-bold border border-blue-200 px-3 py-1 rounded-full hover:bg-blue-50">+ 繼續新增</button>
+                        {activeTab === 'warehouse' && (
+                            <div className="fade-in space-y-4">
+                                <div className="flex items-center justify-between mb-2">
+                                    <h2 className="text-xl font-black text-slate-700">商品庫存清單</h2>
+                                    <span className="text-xs bg-white px-3 py-1 rounded-full shadow-sm text-slate-500">共 {warehouseItems.length} 筆</span>
                                 </div>
-                                {unassignedItems.length === 0 ? (
-                                    <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-300">
-                                        <Icon name="check-circle" size={48} className="text-green-200 mx-auto mb-4"/>
-                                        <p className="text-slate-400 font-bold">目前沒有待歸戶商品</p>
-                                        <p className="text-xs text-slate-300 mt-2">請確認下方日誌是否有權限錯誤</p>
-                                    </div>
-                                ) : (
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        {unassignedItems.sort((a,b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map(item => (
-                                            <UnassignedItemRow key={item.id} item={item} db={db} appId={appId} defaultRate={defaultRate} />
-                                        ))}
-                                    </div>
-                                )}
+                                {warehouseItems.map(item => <UnassignedItemRow key={item.id} item={item} onEdit={startEdit} onDelete={handleDelete} onTogglePaid={togglePaid} existingRecipients={existingRecipients} onQuickAssign={handleQuickAssign} />)}
                             </div>
                         )}
 
                         {activeTab === 'shipping' && (
-                            <div className="fade-in">
-                                {assignedItems.length === 0 ? (
-                                    <div className="text-center py-20 text-slate-400">尚無已歸戶的訂單</div>
-                                ) : (
-                                    Object.entries(shippingGroups).map(([pid, recipients]) => (
-                                        <div key={pid} className="mb-8">
-                                            <h3 className="text-lg font-black text-slate-800 mb-4 px-2 border-l-4 border-blue-500">{pid}</h3>
-                                            <div className="space-y-4">
-                                                {Object.entries(recipients).map(([recipient, list]) => (
-                                                    <div key={recipient} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-                                                        <div className="flex justify-between items-center mb-3 pb-2 border-b border-slate-100">
-                                                            <div className="font-bold text-slate-700 flex items-center gap-2"><Icon name="user" size={16} className="text-blue-500"/> {recipient}</div>
-                                                            <div className="text-xs font-mono text-slate-400">{list.length} 件商品</div>
-                                                        </div>
-                                                        <ul className="space-y-2">{list.map(item => <li key={item.id} className="flex justify-between text-sm"><span className="text-slate-600">{item.name}</span><span className="font-mono font-bold text-green-600">${item.sellingPrice}</span></li>)}</ul>
+                            <div className="fade-in space-y-8">
+                                {Object.keys(shippingGroups).length === 0 && <div className="text-center py-20 text-slate-400">尚無已歸戶的訂單</div>}
+                                {Object.entries(shippingGroups).map(([pId, recipients]) => {
+                                    const overhead = batchOverheads[pId] || { shipping: 0, tax: 0 };
+                                    let totalS = 0, totalC = 0, totalShippingCollected = 0;
+                                    
+                                    Object.values(recipients).forEach(r => {
+                                        const shipNum = parseFloat(r.info.shipping);
+                                        if (!isNaN(shipNum)) totalShippingCollected += shipNum;
+                                        r.items.forEach(i => { totalS += (i.sellingPrice || 0); totalC += (i.twdCost || 0); });
+                                    });
+                                    const profit = totalS - totalC - (overhead.shipping || 0) - (overhead.tax || 0);
+
+                                    return (
+                                        <div key={pId} className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+                                            <div className="bg-slate-800 p-5 text-white">
+                                                <div className="flex justify-between items-start">
+                                                    <div><h3 className="font-black text-xl tracking-wide">{pId === "undefined" ? "未分類批次" : pId}</h3><div className="text-[10px] text-slate-400 mt-1">國際包裹批次</div></div>
+                                                    <div className="text-right">
+                                                        <div className="text-xs text-slate-400 font-bold uppercase">批次淨利 (不含運費)</div>
+                                                        <div className={`text-2xl font-black font-mono ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>${profit.toLocaleString()}</div>
+                                                        <div className="text-[10px] text-slate-500 mt-1">此批次帳面運費總計: ${totalShippingCollected}</div>
                                                     </div>
-                                                ))}
+                                                </div>
+                                                <div className="flex gap-4 mt-4 pt-4 border-t border-slate-700">
+                                                    <div className="flex-1"><label className="text-[10px] text-slate-400 block">整箱國際運費</label><input type="number" value={overhead.shipping || ''} onChange={e => updateOverhead(pId, 'shipping', e.target.value)} className="w-full bg-slate-700 border-b border-slate-500 text-white text-sm p-1 outline-none" placeholder="0"/></div>
+                                                    <div className="flex-1"><label className="text-[10px] text-slate-400 block">整箱關稅</label><input type="number" value={overhead.tax || ''} onChange={e => updateOverhead(pId, 'tax', e.target.value)} className="w-full bg-slate-700 border-b border-slate-500 text-white text-sm p-1 outline-none" placeholder="0"/></div>
+                                                </div>
+                                            </div>
+                                            <div className="p-4 space-y-4 bg-slate-50">
+                                                {Object.entries(recipients).map(([rName, data]) => {
+                                                    const pS = data.items.reduce((s, i) => s + i.sellingPrice, 0);
+                                                    const pC = data.items.reduce((s, i) => s + i.twdCost, 0);
+                                                    const personProfit = pS - pC;
+                                                    const isEditing = editingRecipient && editingRecipient.batchId === pId && editingRecipient.originalName === rName;
+
+                                                    return (
+                                                        <div key={rName} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm transition-all hover:shadow-md">
+                                                            {!isEditing ? (
+                                                                <div className="flex flex-col sm:flex-row justify-between items-start mb-3 pb-2 border-b border-slate-100 gap-4">
+                                                                    <div className="flex items-start gap-3 w-full">
+                                                                        <div className="bg-blue-100 p-2 rounded-full text-blue-600 mt-1"><Icon name="user" size={18}/></div>
+                                                                        <div className="flex-1">
+                                                                            <div className="flex items-center gap-2">
+                                                                                <div className="font-bold text-slate-700 text-lg">{rName}</div>
+                                                                                {data.info.account && <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-500 font-mono">@{data.info.account}</span>}
+                                                                                <button onClick={() => setEditingRecipient({
+                                                                                    batchId: pId, originalName: rName, 
+                                                                                    name: rName, 
+                                                                                    account: data.info.account || '',
+                                                                                    phone: data.info.phone || '', 
+                                                                                    address: data.info.address || '', 
+                                                                                    code: data.info.code || '', 
+                                                                                    shipping: data.info.shipping || ''
+                                                                                })} className="text-slate-300 hover:text-blue-500 ml-auto sm:ml-2"><Icon name="pencil" size={14}/></button>
+                                                                            </div>
+                                                                            <div className="text-xs text-slate-500 mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
+                                                                                <div className="flex items-center gap-1"><Icon name="phone" size={12}/> {data.info.phone || '-'}</div>
+                                                                                <div className="flex items-center gap-1"><Icon name="map-pin" size={12}/> <span className="truncate max-w-[150px]">{data.info.address || '-'}</span></div>
+                                                                                <div className="flex items-center gap-1 text-blue-600 font-bold"><Icon name="barcode" size={12}/> {data.info.code || '無編號'}</div>
+                                                                                <div className="flex items-center gap-1 text-amber-600 font-bold"><Icon name="truck" size={12}/> 運費: {data.info.shipping}</div>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="text-right w-full sm:w-auto flex flex-row sm:flex-col justify-between items-center sm:items-end border-t sm:border-0 pt-2 sm:pt-0">
+                                                                        <div className="text-[10px] text-slate-400">商品淨利</div>
+                                                                        <div className="font-black text-green-600 font-mono text-lg">${personProfit}</div>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="mb-4 bg-blue-50 p-4 rounded-xl border border-blue-200">
+                                                                    <div className="text-sm font-bold text-blue-600 mb-3 flex items-center gap-2"><Icon name="edit-3" size={14}/> 編輯收件資訊</div>
+                                                                    
+                                                                    <div className="grid grid-cols-2 gap-3 mb-3">
+                                                                        <div><label className="text-[10px] text-blue-400 block mb-1">訂購帳號</label><input className="w-full p-2 border rounded bg-white text-xs" value={editingRecipient.account} onChange={e => setEditingRecipient({...editingRecipient, account: e.target.value})} /></div>
+                                                                        <div><label className="text-[10px] text-blue-400 block mb-1">收件姓名</label><input className="w-full p-2 border rounded bg-white text-xs" value={editingRecipient.name} onChange={e => setEditingRecipient({...editingRecipient, name: e.target.value})} /></div>
+                                                                    </div>
+                                                                    
+                                                                    <div className="grid grid-cols-2 gap-3 mb-3">
+                                                                        <div><label className="text-[10px] text-blue-400 block mb-1">電話</label><input className="w-full p-2 border rounded bg-white text-xs" value={editingRecipient.phone} onChange={e => setEditingRecipient({...editingRecipient, phone: e.target.value})} /></div>
+                                                                        <div><label className="text-[10px] text-blue-400 block mb-1">寄件編號</label><input className="w-full p-2 border rounded bg-white text-xs" value={editingRecipient.code} onChange={e => setEditingRecipient({...editingRecipient, code: e.target.value})} /></div>
+                                                                    </div>
+
+                                                                    <div className="mb-3">
+                                                                        <label className="text-[10px] text-blue-400 block mb-1">地址 / 店到店</label>
+                                                                        <input className="w-full p-2 border rounded bg-white text-xs" value={editingRecipient.address} onChange={e => setEditingRecipient({...editingRecipient, address: e.target.value})} />
+                                                                    </div>
+
+                                                                    <div className="mb-4">
+                                                                        <label className="text-[10px] text-blue-400 block mb-1">運費 (可填文字)</label>
+                                                                        <input className="w-full p-2 border rounded bg-white text-xs" value={editingRecipient.shipping} onChange={e => setEditingRecipient({...editingRecipient, shipping: e.target.value})} />
+                                                                    </div>
+
+                                                                    <div className="flex gap-2">
+                                                                        <button onClick={saveRecipientInfo} className="flex-1 bg-blue-600 text-white py-2 rounded text-xs font-bold hover:bg-blue-500 shadow">儲存變更</button>
+                                                                        <button onClick={() => setEditingRecipient(null)} className="px-4 bg-white border border-slate-300 py-2 rounded text-xs hover:bg-slate-50 text-slate-500">取消</button>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+
+                                                            <ul className="space-y-1">
+                                                                {data.items.map(item => (
+                                                                    <li key={item.id} className={`flex items-center gap-3 p-2 rounded transition-all ${item.isChecked ? 'bg-green-50/50' : 'bg-slate-50'}`}>
+                                                                        <input type="checkbox" checked={!!item.isChecked} onChange={() => toggleChecked(item)} className="custom-checkbox" />
+                                                                        <div className={`flex-1 flex justify-between items-center ${item.isChecked ? 'opacity-50 grayscale' : ''}`}>
+                                                                            <div>
+                                                                                <span className={`text-sm font-bold block ${item.isChecked ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{item.name}</span>
+                                                                                <div className="flex gap-2 text-[10px] font-mono text-slate-400">
+                                                                                    <span>¥{item.jpyPrice}</span>
+                                                                                    {item.isPaid && <span className="text-green-500 font-bold border border-green-200 px-1 rounded bg-white">已付款</span>}
+                                                                                </div>
+                                                                            </div>
+                                                                            <span className={`font-mono font-bold ${item.isChecked ? 'text-slate-400 line-through' : 'text-green-600'}`}>${item.sellingPrice}</span>
+                                                                        </div>
+                                                                    </li>
+                                                                ))}
+                                                            </ul>
+                                                        </div>
+                                                    );
+                                                })}
                                             </div>
                                         </div>
-                                    ))
-                                )}
+                                    );
+                                })}
                             </div>
                         )}
                     </div>
-                    <DebugLog logs={logs} />
                 </div>
             );
         };
